@@ -40,5 +40,19 @@ Record actual results and hardware revisions before presenting the system as cus
 - [ ] Establish a safe maximum watering time and a manual stop procedure.
 
 ## E. Customer handover evidence
+## E. Zone 4 soil node and edge pipeline (WiFi / MQTT)
+
+Bench-tested 2026-10-18 on a Wemos D1 R1.
+
+- [x] Node joins WiFi through the setup portal; WiFi and broker address are saved in flash.
+- [x] Node publishes to `zone4/soil01/data` every 15 s (test interval) and Mosquitto receives it.
+- [x] Node-RED maps the payload to `Z04_MOISTURE` and inserts it into `tag_values`.
+- [x] Web SCADA Zone 04 card reads `/api/zone4`.
+- [ ] Sensor wired and calibrated (`ADC_DRY` / `ADC_WET` measured in air and in water).
+- [ ] ONLINE, STALE and NO DATA transitions verified (unplug the node, stop the server).
+- [ ] Node moved to a different network (portal reopens after 5 failed wakes, or with D3 held to GND at reset).
+- [ ] Deep sleep wake verified with D2 (GPIO16) wired to RST and `USE_DEEP_SLEEP 1`.
+- [ ] Battery runtime measured (sleep current and wake duration).
+- [ ] Broker authentication and TLS added (currently anonymous, private LAN only).
 
 Record the hardware BOM, wiring diagram, valve model, driver schematic, firmware revision, test date, RF range conditions, known limitations, and outstanding corrective actions. Mark untested items as pending rather than complete.
