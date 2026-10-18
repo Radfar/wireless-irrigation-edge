@@ -1,0 +1,267 @@
+[
+    {
+        "id": "6db0883831275724",
+        "type": "tab",
+        "label": "Flow 1",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "20c4349527962eba",
+        "type": "mqtt in",
+        "z": "6db0883831275724",
+        "name": "",
+        "topic": "zone4/soil01/data",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "480d0a865368662a",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 160,
+        "y": 40,
+        "wires": [
+            [
+                "ee49ee8f09ec5215",
+                "abc1abbf70239672"
+            ]
+        ]
+    },
+    {
+        "id": "ee49ee8f09ec5215",
+        "type": "debug",
+        "z": "6db0883831275724",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 380,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "abc1abbf70239672",
+        "type": "function",
+        "z": "6db0883831275724",
+        "name": "Map to Z04 tags",
+        "func": "msg.payload = { Z04_MOISTURE: msg.payload.moisture };\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 100,
+        "wires": [
+            [
+                "a7067404bdb29ee7",
+                "f93badc933741e2e"
+            ]
+        ]
+    },
+    {
+        "id": "a7067404bdb29ee7",
+        "type": "debug",
+        "z": "6db0883831275724",
+        "name": "debug 2",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 600,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "ae79102eb0f0b6ce",
+        "type": "postgresql",
+        "z": "6db0883831275724",
+        "name": "Local Mosquitto",
+        "query": "SELECT NOW();",
+        "postgreSQLConfig": "11661b608aa0f1f6",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 400,
+        "y": 200,
+        "wires": [
+            [
+                "03370536651b6113"
+            ]
+        ]
+    },
+    {
+        "id": "03370536651b6113",
+        "type": "debug",
+        "z": "6db0883831275724",
+        "name": "debug 3",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 600,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "42e5ce4eafdc0c31",
+        "type": "inject",
+        "z": "6db0883831275724",
+        "name": "",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 200,
+        "wires": [
+            [
+                "ae79102eb0f0b6ce"
+            ]
+        ]
+    },
+    {
+        "id": "f93badc933741e2e",
+        "type": "function",
+        "z": "6db0883831275724",
+        "name": "Build insert params",
+        "func": "msg.params = [75, msg.payload.Z04_MOISTURE, 'GOOD'];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 630,
+        "y": 140,
+        "wires": [
+            [
+                "109f499bff4832b7"
+            ]
+        ]
+    },
+    {
+        "id": "109f499bff4832b7",
+        "type": "postgresql",
+        "z": "6db0883831275724",
+        "name": "Local Postgres (building_irrigation)",
+        "query": "INSERT INTO tag_values (tag_id, value, quality) VALUES ($1, $2, $3);",
+        "postgreSQLConfig": "11661b608aa0f1f6",
+        "split": false,
+        "rowsPerMsg": 1,
+        "outputs": 1,
+        "x": 920,
+        "y": 140,
+        "wires": [
+            [
+                "cbfe729616d041d5"
+            ]
+        ]
+    },
+    {
+        "id": "cbfe729616d041d5",
+        "type": "debug",
+        "z": "6db0883831275724",
+        "name": "debug 4",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 840,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "480d0a865368662a",
+        "type": "mqtt-broker",
+        "name": "Local Mosquitto",
+        "broker": "localhost",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "11661b608aa0f1f6",
+        "type": "postgreSQLConfig",
+        "name": "",
+        "host": "127.0.0.1",
+        "hostFieldType": "str",
+        "port": 5432,
+        "portFieldType": "num",
+        "database": "building_irrigation",
+        "databaseFieldType": "str",
+        "ssl": "false",
+        "sslFieldType": "bool",
+        "applicationName": "",
+        "applicationNameType": "str",
+        "max": 10,
+        "maxFieldType": "num",
+        "idle": 1000,
+        "idleFieldType": "num",
+        "connectionTimeout": 10000,
+        "connectionTimeoutFieldType": "num",
+        "userFieldType": "cred",
+        "userEnv": "",
+        "passwordFieldType": "cred",
+        "passwordEnv": ""
+    },
+    {
+        "id": "0d8cd41beab51783",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-postgresql": "0.16.2"
+        }
+    }
+]
