@@ -41,7 +41,7 @@
 
 RCSwitch mySwitch = RCSwitch();
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   WiFi.mode( WIFI_OFF );
   WiFi.forceSleepBegin();  
   Serial.println("init... ");
