@@ -5,8 +5,15 @@
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
 #include <RCSwitch.h>
-#include <SoftReset.h>
+//#include <SoftReset.h>
+#include <avr/wdt.h>
 
+void soft_restart() {
+    wdt_enable(WDTO_15MS);
+    while (true) {
+        // Wait for the watchdog to reset the MCU.
+    }
+}
 #define VALVE                   4 //Number of valves in use: default 128
 #define WATERING_DURATION       2000 //msec
 #define OFF                     LOW
