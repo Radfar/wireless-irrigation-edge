@@ -15,7 +15,7 @@ void soft_restart() {
     }
 }
 #define VALVE                   4 //Number of valves in use: default 128
-#define WATERING_DURATION       2000 //msec
+#define WATERING_DURATION       2000 //msec for 1 sec 60000
 #define OFF                     LOW
 #define ON                      HIGH
 
