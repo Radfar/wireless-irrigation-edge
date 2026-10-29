@@ -105,11 +105,12 @@ bool runSetupPortal() {
   Serial.println("Opening setup portal: " + apName);
 
   bool ok = wm.startConfigPortal(apName.c_str());
-  if (ok) {
-    String h = pHost.getValue();
-    h.trim();
-    if (h.length() > 0) { brokerHost = h; saveBrokerHost(h); }
-  }
+
+  // Save the broker address even if the WiFi connect failed or the portal timed out.
+  // WiFiManager updates the field whenever the form is submitted.
+  String h = pHost.getValue();
+  h.trim();
+  if (h.length() > 0 && h != brokerHost) { brokerHost = h; saveBrokerHost(h); }
   return ok;
 }
 
@@ -151,7 +152,7 @@ void setup() {
     goToSleep();
     return;
   }
-  rtcData.failCount = 0;
+  //rtcData.failCount = 0;
 
   Serial.print("WiFi OK, IP: ");
   Serial.println(WiFi.localIP());
@@ -167,9 +168,12 @@ void setup() {
     mqtt.loop();
     delay(100);
     mqtt.disconnect();
+    if (ok) rtcData.failCount = 0;
+    else    rtcData.failCount++;
   } else {
     Serial.print("MQTT FAILED, state = ");
     Serial.println(mqtt.state());
+    rtcData.failCount++;
   }
   goToSleep();
 }
