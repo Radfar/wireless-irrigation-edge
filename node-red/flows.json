@@ -20,7 +20,7 @@
         "rap": true,
         "rh": 0,
         "inputs": 0,
-        "x": 160,
+        "x": 100,
         "y": 40,
         "wires": [
             [
@@ -41,7 +41,7 @@
         "complete": "false",
         "statusVal": "",
         "statusType": "auto",
-        "x": 380,
+        "x": 280,
         "y": 40,
         "wires": []
     },
@@ -57,8 +57,8 @@
         "initialize": "",
         "finalize": "",
         "libs": [],
-        "x": 400,
-        "y": 100,
+        "x": 300,
+        "y": 80,
         "wires": [
             [
                 "a7067404bdb29ee7",
@@ -78,8 +78,8 @@
         "complete": "false",
         "statusVal": "",
         "statusType": "auto",
-        "x": 600,
-        "y": 100,
+        "x": 480,
+        "y": 80,
         "wires": []
     },
     {
@@ -92,8 +92,8 @@
         "split": false,
         "rowsPerMsg": 1,
         "outputs": 1,
-        "x": 400,
-        "y": 200,
+        "x": 300,
+        "y": 160,
         "wires": [
             [
                 "03370536651b6113"
@@ -109,11 +109,12 @@
         "tosidebar": true,
         "console": false,
         "tostatus": false,
-        "complete": "false",
+        "complete": "true",
+        "targetType": "full",
         "statusVal": "",
         "statusType": "auto",
-        "x": 600,
-        "y": 200,
+        "x": 480,
+        "y": 160,
         "wires": []
     },
     {
@@ -137,8 +138,8 @@
         "topic": "",
         "payload": "",
         "payloadType": "date",
-        "x": 180,
-        "y": 200,
+        "x": 120,
+        "y": 160,
         "wires": [
             [
                 "ae79102eb0f0b6ce"
@@ -157,8 +158,8 @@
         "initialize": "",
         "finalize": "",
         "libs": [],
-        "x": 630,
-        "y": 140,
+        "x": 510,
+        "y": 120,
         "wires": [
             [
                 "109f499bff4832b7"
@@ -175,8 +176,8 @@
         "split": false,
         "rowsPerMsg": 1,
         "outputs": 1,
-        "x": 920,
-        "y": 140,
+        "x": 760,
+        "y": 120,
         "wires": [
             [
                 "cbfe729616d041d5"
@@ -196,8 +197,8 @@
         "targetType": "full",
         "statusVal": "",
         "statusType": "auto",
-        "x": 840,
-        "y": 200,
+        "x": 760,
+        "y": 80,
         "wires": []
     },
     {
@@ -257,7 +258,7 @@
         "passwordEnv": ""
     },
     {
-        "id": "0d8cd41beab51783",
+        "id": "4e079a72bab007c7",
         "type": "global-config",
         "env": [],
         "modules": {
