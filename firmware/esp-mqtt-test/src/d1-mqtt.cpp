@@ -24,6 +24,7 @@
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 #include <LittleFS.h>
+#include <WiFiUdp.h>
 
 // ---- MQTT settings ----
 const uint16_t MQTT_PORT = 1883;
@@ -37,6 +38,10 @@ const char* NODE_ID = "soil01";
 const unsigned long TELEMETRY_INTERVAL_MS = 15000UL;
 const unsigned long WIFI_RETRY_INTERVAL_MS = 10000UL;
 const unsigned long MQTT_RETRY_INTERVAL_MS = 5000UL;
+const unsigned long DISCOVERY_RETRY_INTERVAL_MS = 60000UL;
+const uint16_t DISCOVERY_PORT = 1884;
+const char* DISCOVERY_REQUEST = "IRRIGATION_MQTT_DISCOVER_V1";
+const char* DISCOVERY_RESPONSE_PREFIX = "IRRIGATION_MQTT_HERE_V1|";
 
 // ---- LED mode indication ----
 const uint8_t MODE_AUTO = 0;
@@ -45,7 +50,7 @@ const unsigned long MANUAL_LED_INTERVAL_MS = 500UL;
 const uint8_t LED_ON = LOW;   // Active-low onboard LED on common D1/D1 mini
 const uint8_t LED_OFF = HIGH;
 
-const uint8_t MAX_FAILS_BEFORE_PORTAL = 5;
+const uint8_t MAX_MQTT_FAILURES_BEFORE_DISCOVERY = 5;
 
 // ---- Existing pins: unchanged ----
 const uint8_t SENSOR_POWER_PIN = D5;
@@ -78,11 +83,14 @@ const int ADC_WET = 360;
 
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
+WiFiUDP discoveryUdp;
 
 String brokerHost;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastWifiAttemptMs = 0;
 unsigned long lastMqttAttemptMs = 0;
+unsigned long lastDiscoveryAttemptMs = 0;
+uint8_t consecutiveMqttFailures = 0;
 unsigned long lastLedToggleMs = 0;
 uint8_t operatingMode = MODE_AUTO;
 bool ledState = false;
@@ -361,6 +369,88 @@ void maintainWifiConnection() {
   WiFi.begin();
 }
 
+bool isValidIPv4(const String& value) {
+  IPAddress parsed;
+  return parsed.fromString(value);
+}
+
+bool discoverMqttBroker() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  const IPAddress localIp = WiFi.localIP();
+  const IPAddress mask = WiFi.subnetMask();
+  const IPAddress broadcast(
+      localIp[0] | (uint8_t)~mask[0],
+      localIp[1] | (uint8_t)~mask[1],
+      localIp[2] | (uint8_t)~mask[2],
+      localIp[3] | (uint8_t)~mask[3]);
+
+  if (!discoveryUdp.begin(0)) {
+    Serial.println("Broker discovery: could not open UDP socket");
+    return false;
+  }
+
+  Serial.print("Broker discovery: broadcasting on ");
+  Serial.println(broadcast);
+
+  bool found = false;
+  if (discoveryUdp.beginPacket(broadcast, DISCOVERY_PORT)) {
+    discoveryUdp.write((const uint8_t*)DISCOVERY_REQUEST,
+                       strlen(DISCOVERY_REQUEST));
+    discoveryUdp.endPacket();
+
+    const unsigned long started = millis();
+    while (millis() - started < 2200UL) {
+      const int packetSize = discoveryUdp.parsePacket();
+      if (packetSize > 0) {
+        char packet[100];
+        const int len = discoveryUdp.read(packet, sizeof(packet) - 1);
+        if (len > 0) {
+          packet[len] = '\0';
+          String response(packet);
+          response.trim();
+
+          const String prefix(DISCOVERY_RESPONSE_PREFIX);
+          if (response.startsWith(prefix)) {
+            const int separator = response.indexOf('|', prefix.length());
+            if (separator > 0) {
+              const String candidate =
+                  response.substring(prefix.length(), separator);
+              const String portText = response.substring(separator + 1);
+              IPAddress sourceIp = discoveryUdp.remoteIP();
+              IPAddress advertisedIp;
+
+              if (isValidIPv4(candidate) &&
+                  advertisedIp.fromString(candidate) &&
+                  advertisedIp == sourceIp &&
+                  portText == String(MQTT_PORT)) {
+                if (candidate != brokerHost) {
+                  Serial.print("Broker discovery: new broker IP found: ");
+                  Serial.println(candidate);
+                  brokerHost = candidate;
+                  saveBrokerHost(brokerHost);
+                  mqtt.setServer(brokerHost.c_str(), MQTT_PORT);
+                } else {
+                  Serial.print("Broker discovery: broker confirmed at ");
+                  Serial.println(brokerHost);
+                }
+                found = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      delay(10);
+      yield();
+    }
+  }
+
+  discoveryUdp.stop();
+  if (!found) Serial.println("Broker discovery: no response; will retry later");
+  return found;
+}
+
 void maintainMqttConnection() {
   if (WiFi.status() != WL_CONNECTED || mqtt.connected()) return;
 
@@ -379,6 +469,7 @@ void maintainMqttConnection() {
   Serial.println(MQTT_PORT);
 
   if (mqtt.connect(NODE_ID)) {
+    consecutiveMqttFailures = 0;
     Serial.println("MQTT connected");
 
     if (mqtt.subscribe(MQTT_COMMAND_TOPIC)) {
@@ -391,8 +482,15 @@ void maintainMqttConnection() {
     publishDeviceStatus();
     lastTelemetryMs = millis() - TELEMETRY_INTERVAL_MS;
   } else {
+    if (consecutiveMqttFailures < 255) consecutiveMqttFailures++;
     Serial.print("MQTT connection failed, state = ");
     Serial.println(mqtt.state());
+    Serial.printf("Consecutive MQTT failures: %u\\n", consecutiveMqttFailures);
+    if (consecutiveMqttFailures >= MAX_MQTT_FAILURES_BEFORE_DISCOVERY &&
+        millis() - lastDiscoveryAttemptMs >= DISCOVERY_RETRY_INTERVAL_MS) {
+      lastDiscoveryAttemptMs = millis();
+      discoverMqttBroker();
+    }
   }
 }
 
