@@ -3,7 +3,7 @@
   Water Process project
 
   Stage 1: continuous Wi-Fi and MQTT operation.
-  Stage 2: receive AUTO/MANUAL commands and indicate mode on onboard LED.
+  Stage 2: receive AUTO/MANUAL commands and indicate MANUAL mode on onboard LED.
 
   Preserved:
   - Soil calibration and sensor power control.
@@ -13,8 +13,8 @@
   - Optional flow input and latching valve remain disabled.
 
   Important:
-  - The LED indicates the firmware's selected mode only. It is not
-    confirmation of physical valve or pump operation.
+  - LED flashes only in MANUAL mode; it stays OFF in AUTO mode.
+  - The LED indicates firmware mode only, not physical valve/pump operation.
   - This office-test version stays powered and connected; no sleep.
   - Plain MQTT is intended only for a trusted private LAN.
   - LED_BUILTIN on common ESP8266 D1/D1 mini boards is active-low.
@@ -41,8 +41,7 @@ const unsigned long MQTT_RETRY_INTERVAL_MS = 5000UL;
 // ---- LED mode indication ----
 const uint8_t MODE_AUTO = 0;
 const uint8_t MODE_MANUAL = 1;
-const unsigned long AUTO_LED_INTERVAL_MS = 150UL;
-const unsigned long MANUAL_LED_INTERVAL_MS = 600UL;
+const unsigned long MANUAL_LED_INTERVAL_MS = 500UL;
 const uint8_t LED_ON = LOW;   // Active-low onboard LED on common D1/D1 mini
 const uint8_t LED_OFF = HIGH;
 
@@ -199,13 +198,16 @@ bool connectStored() {
 }
 
 void updateModeLed() {
-  const unsigned long interval =
-      operatingMode == MODE_AUTO
-          ? AUTO_LED_INTERVAL_MS
-          : MANUAL_LED_INTERVAL_MS;
+  // AUTO is indicated by a steady OFF LED.
+  if (operatingMode == MODE_AUTO) {
+    ledState = false;
+    digitalWrite(LED_BUILTIN, LED_OFF);
+    return;
+  }
 
+  // MANUAL is indicated by a 500 ms ON/OFF interval.
   const unsigned long now = millis();
-  if (now - lastLedToggleMs >= interval) {
+  if (now - lastLedToggleMs >= MANUAL_LED_INTERVAL_MS) {
     lastLedToggleMs = now;
     ledState = !ledState;
     digitalWrite(LED_BUILTIN, ledState ? LED_ON : LED_OFF);
@@ -216,8 +218,7 @@ const char* modeName() {
   return operatingMode == MODE_AUTO ? "AUTO" : "MANUAL";
 }
 
-// Extract a simple quoted JSON string field. This is sufficient for the
-// fixed command schema and avoids adding a JSON library dependency.
+// Extract a simple quoted JSON string field for the fixed command schema.
 String jsonStringField(const String& json, const char* key) {
   const String token = String("\"") + key + "\"";
   int pos = json.indexOf(token);
@@ -290,10 +291,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   const String commandId =
       safeCommandId(jsonStringField(message, "command_id"));
-  const String command =
-      jsonStringField(message, "command");
-  const String requestedMode =
-      jsonStringField(message, "mode");
+  const String command = jsonStringField(message, "command");
+  const String requestedMode = jsonStringField(message, "mode");
 
   if (command != "SET_MODE") {
     publishCommandResult(commandId, false, "Unsupported command");
@@ -309,6 +308,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
+  // Restart the LED pattern from OFF after every accepted mode change.
   lastLedToggleMs = millis();
   ledState = false;
   digitalWrite(LED_BUILTIN, LED_OFF);
