@@ -385,7 +385,7 @@ bool discoverMqttBroker() {
       localIp[2] | (uint8_t)~mask[2],
       localIp[3] | (uint8_t)~mask[3]);
 
-  if (!discoveryUdp.begin(0)) {
+  if (!discoveryUdp.begin(1885)) {
     Serial.println("Broker discovery: could not open UDP socket");
     return false;
   }
