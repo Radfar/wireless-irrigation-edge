@@ -277,17 +277,30 @@ void publishCommandResult(const String& commandId, bool accepted,
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Log every MQTT packet delivered to this client before topic filtering.
   String topicName(topic);
-  if (topicName != MQTT_COMMAND_TOPIC) return;
-
   String message;
   message.reserve(length + 1);
   for (unsigned int i = 0; i < length; i++) {
     message += static_cast<char>(payload[i]);
   }
 
-  Serial.print("MQTT command received: ");
+  Serial.println();
+  Serial.println("========== MQTT MESSAGE RECEIVED ==========");
+  Serial.print("Topic: ");
+  Serial.println(topicName);
+  Serial.print("Payload length: ");
+  Serial.println(length);
+  Serial.print("Payload: ");
   Serial.println(message);
+  Serial.println("============================================");
+
+  if (topicName != MQTT_COMMAND_TOPIC) {
+    Serial.println("Message ignored: topic is not the command topic");
+    return;
+  }
+
+  Serial.println("Processing Zone 04 command...");
 
   const String commandId =
       safeCommandId(jsonStringField(message, "command_id"));
