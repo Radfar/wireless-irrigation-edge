@@ -2,20 +2,22 @@
   ESP8266 capacitive soil moisture node — Zone 4 office-test firmware
   Water Process project
 
-  Stage 1:
-  - Continuous Wi-Fi and MQTT operation for bidirectional development.
-  - Preserves soil calibration, WiFiManager portal, LittleFS broker
-    configuration, MQTT node ID/topic/payload and sensor power control.
-  - Existing telemetry remains {"moisture": <number>}.
-  - MQTT command subscription and LED indication will be added in Stage 2.
-  - Latching/bistable valve control remains disabled until the physical
-    driver, GPIOs, polarity and pulse timing are verified.
+  Stage 1: continuous Wi-Fi and MQTT operation.
+  Stage 2: receive AUTO/MANUAL commands and indicate mode on onboard LED.
 
-  Power notes:
-  - This office-test version stays powered and connected; it does not sleep.
-  - Battery wake-up operation will be designed separately.
+  Preserved:
+  - Soil calibration and sensor power control.
+  - WiFiManager portal and LittleFS broker configuration.
+  - Existing telemetry topic and payload: zone4/soil01/data,
+    {"moisture": <number>}.
+  - Optional flow input and latching valve remain disabled.
+
+  Important:
+  - The LED indicates the firmware's selected mode only. It is not
+    confirmation of physical valve or pump operation.
+  - This office-test version stays powered and connected; no sleep.
   - Plain MQTT is intended only for a trusted private LAN.
-  - Battery voltage monitoring is not included; A0 is used by the sensor.
+  - LED_BUILTIN on common ESP8266 D1/D1 mini boards is active-low.
 */
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
@@ -23,15 +25,26 @@
 #include <PubSubClient.h>
 #include <LittleFS.h>
 
-// ---- MQTT settings: preserve existing integration ----
+// ---- MQTT settings ----
 const uint16_t MQTT_PORT = 1883;
 const char* MQTT_TOPIC = "zone4/soil01/data";
+const char* MQTT_COMMAND_TOPIC = "zone4/soil01/command";
+const char* MQTT_STATUS_TOPIC = "zone4/soil01/status";
+const char* MQTT_RESULT_TOPIC = "zone4/soil01/command_result";
 const char* NODE_ID = "soil01";
 
 // ---- Continuous office-test timing ----
 const unsigned long TELEMETRY_INTERVAL_MS = 15000UL;
 const unsigned long WIFI_RETRY_INTERVAL_MS = 10000UL;
 const unsigned long MQTT_RETRY_INTERVAL_MS = 5000UL;
+
+// ---- LED mode indication ----
+const uint8_t MODE_AUTO = 0;
+const uint8_t MODE_MANUAL = 1;
+const unsigned long AUTO_LED_INTERVAL_MS = 150UL;
+const unsigned long MANUAL_LED_INTERVAL_MS = 600UL;
+const uint8_t LED_ON = LOW;   // Active-low onboard LED on common D1/D1 mini
+const uint8_t LED_OFF = HIGH;
 
 const uint8_t MAX_FAILS_BEFORE_PORTAL = 5;
 
@@ -40,7 +53,6 @@ const uint8_t SENSOR_POWER_PIN = D5;
 const uint8_t SENSOR_ADC_PIN = A0;
 const uint8_t CONFIG_PIN = D3;  // Hold to GND during reset for portal
 
-// Optional hardware remains disabled until wiring is verified.
 #define ENABLE_FLOW_INPUT 0
 #define ENABLE_LATCHING_VALVE 0
 
@@ -62,7 +74,6 @@ const uint8_t CONFIG_PIN = D3;  // Hold to GND during reset for portal
   #error "Valve control requires verified driver GPIOs, polarity and pulse timing."
 #endif
 
-// ---- Soil calibration: unchanged ----
 const int ADC_DRY = 780;
 const int ADC_WET = 360;
 
@@ -73,7 +84,9 @@ String brokerHost;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastWifiAttemptMs = 0;
 unsigned long lastMqttAttemptMs = 0;
-uint8_t wifiConnectFailures = 0;
+unsigned long lastLedToggleMs = 0;
+uint8_t operatingMode = MODE_AUTO;
+bool ledState = false;
 
 String loadBrokerHost() {
   if (!LittleFS.exists("/broker.txt")) return "";
@@ -126,8 +139,6 @@ void setupFlowInput() {
   lastFlowSampleMs = millis();
 }
 
-// Frequency in Hz = pulses / elapsed seconds.
-// Supplied meter formula: flow L/min = frequency Hz / 7.5.
 void updateFlowMeasurement() {
   const uint32_t now = millis();
   const uint32_t elapsed = now - lastFlowSampleMs;
@@ -144,9 +155,7 @@ void updateFlowMeasurement() {
 
   flowLpm = frequencyHz / 7.5f;
   lastFlowSampleMs = now;
-
-  Serial.printf("Flow: %.2f L/min (%.2f Hz)\n",
-                flowLpm, frequencyHz);
+  Serial.printf("Flow: %.2f L/min (%.2f Hz)\n", flowLpm, frequencyHz);
 }
 #endif
 
@@ -162,17 +171,12 @@ bool runSetupPortal() {
   wm.addParameter(&pHost);
   wm.setConfigPortalTimeout(180);
 
-  const String apName =
-      "SoilNode-" + String(ESP.getChipId(), HEX);
-
+  const String apName = "SoilNode-" + String(ESP.getChipId(), HEX);
   Serial.println("Opening setup portal: " + apName);
   const bool ok = wm.startConfigPortal(apName.c_str());
 
-  // Preserve the original behavior: save a submitted broker address
-  // even if Wi-Fi connection fails or the portal times out.
   String h = pHost.getValue();
   h.trim();
-
   if (h.length() > 0 && h != brokerHost) {
     brokerHost = h;
     saveBrokerHost(h);
@@ -194,12 +198,132 @@ bool connectStored() {
   return WiFi.status() == WL_CONNECTED;
 }
 
+void updateModeLed() {
+  const unsigned long interval =
+      operatingMode == MODE_AUTO
+          ? AUTO_LED_INTERVAL_MS
+          : MANUAL_LED_INTERVAL_MS;
+
+  const unsigned long now = millis();
+  if (now - lastLedToggleMs >= interval) {
+    lastLedToggleMs = now;
+    ledState = !ledState;
+    digitalWrite(LED_BUILTIN, ledState ? LED_ON : LED_OFF);
+  }
+}
+
+const char* modeName() {
+  return operatingMode == MODE_AUTO ? "AUTO" : "MANUAL";
+}
+
+// Extract a simple quoted JSON string field. This is sufficient for the
+// fixed command schema and avoids adding a JSON library dependency.
+String jsonStringField(const String& json, const char* key) {
+  const String token = String("\"") + key + "\"";
+  int pos = json.indexOf(token);
+  if (pos < 0) return "";
+
+  pos = json.indexOf(':', pos + token.length());
+  if (pos < 0) return "";
+
+  int firstQuote = json.indexOf('\"', pos + 1);
+  if (firstQuote < 0) return "";
+
+  int secondQuote = json.indexOf('\"', firstQuote + 1);
+  if (secondQuote < 0) return "";
+
+  return json.substring(firstQuote + 1, secondQuote);
+}
+
+String safeCommandId(String id) {
+  String safe;
+  for (unsigned int i = 0; i < id.length() && safe.length() < 48; i++) {
+    const char c = id.charAt(i);
+    if ((c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+      safe += c;
+    }
+  }
+  return safe;
+}
+
+void publishDeviceStatus() {
+  if (!mqtt.connected()) return;
+
+  char payload[96];
+  snprintf(payload, sizeof(payload),
+           "{\"online\":true,\"mode\":\"%s\"}", modeName());
+  mqtt.publish(MQTT_STATUS_TOPIC, payload, true);
+  Serial.print("Published device status: ");
+  Serial.println(payload);
+}
+
+void publishCommandResult(const String& commandId, bool accepted,
+                          const char* message) {
+  if (!mqtt.connected()) return;
+
+  char payload[180];
+  snprintf(payload, sizeof(payload),
+           "{\"command_id\":\"%s\",\"accepted\":%s,"
+           "\"mode\":\"%s\",\"message\":\"%s\"}",
+           commandId.c_str(), accepted ? "true" : "false",
+           modeName(), message);
+
+  mqtt.publish(MQTT_RESULT_TOPIC, payload);
+  Serial.print("Published command result: ");
+  Serial.println(payload);
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String topicName(topic);
+  if (topicName != MQTT_COMMAND_TOPIC) return;
+
+  String message;
+  message.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) {
+    message += static_cast<char>(payload[i]);
+  }
+
+  Serial.print("MQTT command received: ");
+  Serial.println(message);
+
+  const String commandId =
+      safeCommandId(jsonStringField(message, "command_id"));
+  const String command =
+      jsonStringField(message, "command");
+  const String requestedMode =
+      jsonStringField(message, "mode");
+
+  if (command != "SET_MODE") {
+    publishCommandResult(commandId, false, "Unsupported command");
+    return;
+  }
+
+  if (requestedMode == "AUTO") {
+    operatingMode = MODE_AUTO;
+  } else if (requestedMode == "MANUAL") {
+    operatingMode = MODE_MANUAL;
+  } else {
+    publishCommandResult(commandId, false, "Invalid mode");
+    return;
+  }
+
+  lastLedToggleMs = millis();
+  ledState = false;
+  digitalWrite(LED_BUILTIN, LED_OFF);
+
+  Serial.print("Operating mode changed to ");
+  Serial.println(modeName());
+
+  publishDeviceStatus();
+  publishCommandResult(commandId, true, "Mode updated");
+}
+
 void publishMoisture() {
   if (!mqtt.connected()) return;
 
   const float moisture = readMoisturePercent();
-
-  // Keep the legacy topic and JSON payload unchanged for Node.js.
   char payload[64];
   snprintf(payload, sizeof(payload),
            "{\"moisture\":%.1f}", moisture);
@@ -231,7 +355,6 @@ void maintainMqttConnection() {
   if (now - lastMqttAttemptMs < MQTT_RETRY_INTERVAL_MS) return;
 
   lastMqttAttemptMs = now;
-
   if (brokerHost.length() == 0) {
     Serial.println("MQTT broker address is empty; configure the device");
     return;
@@ -244,6 +367,15 @@ void maintainMqttConnection() {
 
   if (mqtt.connect(NODE_ID)) {
     Serial.println("MQTT connected");
+
+    if (mqtt.subscribe(MQTT_COMMAND_TOPIC)) {
+      Serial.print("Subscribed to ");
+      Serial.println(MQTT_COMMAND_TOPIC);
+    } else {
+      Serial.println("WARNING: MQTT command subscription failed");
+    }
+
+    publishDeviceStatus();
     lastTelemetryMs = millis() - TELEMETRY_INTERVAL_MS;
   } else {
     Serial.print("MQTT connection failed, state = ");
@@ -258,6 +390,9 @@ void setup() {
   pinMode(SENSOR_POWER_PIN, OUTPUT);
   digitalWrite(SENSOR_POWER_PIN, LOW);
   pinMode(CONFIG_PIN, INPUT_PULLUP);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LED_OFF);
 
   if (!LittleFS.begin()) {
     Serial.println(
@@ -289,18 +424,20 @@ void setup() {
     Serial.println(WiFi.localIP());
   } else {
     Serial.println("Wi-Fi not connected; automatic retries will continue");
-    wifiConnectFailures = MAX_FAILS_BEFORE_PORTAL;
   }
 
   Serial.println("Broker: " + brokerHost);
 
   mqtt.setServer(brokerHost.c_str(), MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
   mqtt.setKeepAlive(30);
   mqtt.setSocketTimeout(3);
+  mqtt.setBufferSize(256);
 
   lastWifiAttemptMs = millis();
   lastMqttAttemptMs = millis() - MQTT_RETRY_INTERVAL_MS;
   lastTelemetryMs = millis() - TELEMETRY_INTERVAL_MS;
+  lastLedToggleMs = millis();
 }
 
 void loop() {
@@ -316,6 +453,8 @@ void loop() {
       publishMoisture();
     }
   }
+
+  updateModeLed();
 
 #if ENABLE_FLOW_INPUT
   updateFlowMeasurement();
