@@ -1,42 +1,62 @@
-
 /*
-  ESP8266 capacitive soil moisture node — Zone 4 interim WiFi path
+  ESP8266 capacitive soil moisture node — Zone 4 office-test firmware
   Water Process project
 
-  Incremental compatibility update:
-  - Preserves existing soil calibration, WiFiManager portal, LittleFS broker
-    configuration, MQTT node ID/topic/payload, and reconnect/sleep behavior.
-  - Optional flow input is scaffolded but DISABLED until the physical pin is
-    confirmed. Flow formula: L/min = frequency_Hz / 7.5.
-  - Latching/bistable valve control is deliberately NOT enabled because the
-    GPIOs, driver circuit, pulse duration, and set/reset polarity are unknown.
-  - Existing MQTT payload remains {"moisture": <number>}.
+  Stage 1: continuous Wi-Fi and MQTT operation.
+  Stage 2: receive AUTO/MANUAL commands and indicate MANUAL mode on onboard LED.
 
-  Power notes:
-  - Deep sleep requires GPIO16 (D0) wired to RST; disabled by default.
+  Preserved:
+  - Soil calibration and sensor power control.
+  - WiFiManager portal and LittleFS broker configuration.
+  - Existing telemetry topic and payload: zone4/soil01/data,
+    {"moisture": <number>}.
+  - Optional flow input and latching valve remain disabled.
+
+  Important:
+  - LED flashes only in MANUAL mode; it stays OFF in AUTO mode.
+  - The LED indicates firmware mode only, not physical valve/pump operation.
+  - This office-test version stays powered and connected; no sleep.
   - Plain MQTT is intended only for a trusted private LAN.
-  - Battery voltage monitoring is not included; A0 is used by the sensor.
+  - LED_BUILTIN on common ESP8266 D1/D1 mini boards is active-low.
 */
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
 #include <LittleFS.h>
+#include <WiFiUdp.h>
 
-// ---- Fixed settings: preserve existing integration ----
+// ---- MQTT settings ----
 const uint16_t MQTT_PORT = 1883;
 const char* MQTT_TOPIC = "zone4/soil01/data";
+const char* MQTT_COMMAND_TOPIC = "zone4/soil01/command";
+const char* MQTT_STATUS_TOPIC = "zone4/soil01/status";
+const char* MQTT_RESULT_TOPIC = "zone4/soil01/command_result";
 const char* NODE_ID = "soil01";
-const uint64_t SLEEP_SECONDS = 15;
-#define USE_DEEP_SLEEP 0
-const uint8_t MAX_FAILS_BEFORE_PORTAL = 5;
+
+// ---- Continuous office-test timing ----
+const unsigned long TELEMETRY_INTERVAL_MS = 15000UL;
+const unsigned long WIFI_RETRY_INTERVAL_MS = 10000UL;
+const unsigned long MQTT_RETRY_INTERVAL_MS = 5000UL;
+const unsigned long DISCOVERY_RETRY_INTERVAL_MS = 60000UL;
+const uint16_t DISCOVERY_PORT = 1884;
+const char* DISCOVERY_REQUEST = "IRRIGATION_MQTT_DISCOVER_V1";
+const char* DISCOVERY_RESPONSE_PREFIX = "IRRIGATION_MQTT_HERE_V1|";
+
+// ---- LED mode indication ----
+const uint8_t MODE_AUTO = 0;
+const uint8_t MODE_MANUAL = 1;
+const unsigned long MANUAL_LED_INTERVAL_MS = 500UL;
+const uint8_t LED_ON = LOW;   // Active-low onboard LED on common D1/D1 mini
+const uint8_t LED_OFF = HIGH;
+
+const uint8_t MAX_MQTT_FAILURES_BEFORE_DISCOVERY = 5;
 
 // ---- Existing pins: unchanged ----
 const uint8_t SENSOR_POWER_PIN = D5;
 const uint8_t SENSOR_ADC_PIN = A0;
-const uint8_t CONFIG_PIN = D3;  // Hold to GND while resetting for portal
+const uint8_t CONFIG_PIN = D3;  // Hold to GND during reset for portal
 
-// Optional hardware remains disabled until wiring is verified.
 #define ENABLE_FLOW_INPUT 0
 #define ENABLE_LATCHING_VALVE 0
 
@@ -58,31 +78,22 @@ const uint8_t CONFIG_PIN = D3;  // Hold to GND while resetting for portal
   #error "Valve control requires verified driver GPIOs, polarity and pulse timing."
 #endif
 
-// ---- Soil calibration: unchanged ----
 const int ADC_DRY = 780;
 const int ADC_WET = 360;
 
-struct RtcData {
-  uint32_t magic;
-  uint32_t failCount;
-};
-RtcData rtcData;
-
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
+WiFiUDP discoveryUdp;
+
 String brokerHost;
-
-void loadRtc() {
-  ESP.rtcUserMemoryRead(0, (uint32_t*)&rtcData, sizeof(rtcData));
-  if (rtcData.magic != 0xA5A5A5A5) {
-    rtcData.magic = 0xA5A5A5A5;
-    rtcData.failCount = 0;
-  }
-}
-
-void saveRtc() {
-  ESP.rtcUserMemoryWrite(0, (uint32_t*)&rtcData, sizeof(rtcData));
-}
+unsigned long lastTelemetryMs = 0;
+unsigned long lastWifiAttemptMs = 0;
+unsigned long lastMqttAttemptMs = 0;
+unsigned long lastDiscoveryAttemptMs = 0;
+uint8_t consecutiveMqttFailures = 0;
+unsigned long lastLedToggleMs = 0;
+uint8_t operatingMode = MODE_AUTO;
+bool ledState = false;
 
 String loadBrokerHost() {
   if (!LittleFS.exists("/broker.txt")) return "";
@@ -135,8 +146,6 @@ void setupFlowInput() {
   lastFlowSampleMs = millis();
 }
 
-// Frequency in Hz = pulses / elapsed seconds.
-// Supplied meter formula: flow L/min = frequency Hz / 7.5.
 void updateFlowMeasurement() {
   const uint32_t now = millis();
   const uint32_t elapsed = now - lastFlowSampleMs;
@@ -153,22 +162,9 @@ void updateFlowMeasurement() {
 
   flowLpm = frequencyHz / 7.5f;
   lastFlowSampleMs = now;
-
-  Serial.printf("Flow: %.2f L/min (%.2f Hz)\n",
-                flowLpm, frequencyHz);
+  Serial.printf("Flow: %.2f L/min (%.2f Hz)\n", flowLpm, frequencyHz);
 }
 #endif
-
-void goToSleep() {
-  saveRtc();
-
-#if USE_DEEP_SLEEP
-  ESP.deepSleep(SLEEP_SECONDS * 1000000ULL);
-#else
-  delay(SLEEP_SECONDS * 1000UL);
-  ESP.restart();
-#endif
-}
 
 bool runSetupPortal() {
   char hostBuf[40];
@@ -182,17 +178,12 @@ bool runSetupPortal() {
   wm.addParameter(&pHost);
   wm.setConfigPortalTimeout(180);
 
-  const String apName =
-      "SoilNode-" + String(ESP.getChipId(), HEX);
-
+  const String apName = "SoilNode-" + String(ESP.getChipId(), HEX);
   Serial.println("Opening setup portal: " + apName);
   const bool ok = wm.startConfigPortal(apName.c_str());
 
-  // Preserve the original behavior: save a submitted broker address
-  // even if Wi-Fi connection fails or the portal times out.
   String h = pHost.getValue();
   h.trim();
-
   if (h.length() > 0 && h != brokerHost) {
     brokerHost = h;
     saveBrokerHost(h);
@@ -202,14 +193,305 @@ bool runSetupPortal() {
 
 bool connectStored() {
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.begin();
 
   const unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED &&
          millis() - start < 15000UL) {
     delay(100);
+    yield();
   }
   return WiFi.status() == WL_CONNECTED;
+}
+
+void updateModeLed() {
+  // AUTO is indicated by a steady OFF LED.
+  if (operatingMode == MODE_AUTO) {
+    ledState = false;
+    digitalWrite(LED_BUILTIN, LED_OFF);
+    return;
+  }
+
+  // MANUAL is indicated by a 500 ms ON/OFF interval.
+  const unsigned long now = millis();
+  if (now - lastLedToggleMs >= MANUAL_LED_INTERVAL_MS) {
+    lastLedToggleMs = now;
+    ledState = !ledState;
+    digitalWrite(LED_BUILTIN, ledState ? LED_ON : LED_OFF);
+  }
+}
+
+const char* modeName() {
+  return operatingMode == MODE_AUTO ? "AUTO" : "MANUAL";
+}
+
+// Extract a simple quoted JSON string field for the fixed command schema.
+String jsonStringField(const String& json, const char* key) {
+  const String token = String("\"") + key + "\"";
+  int pos = json.indexOf(token);
+  if (pos < 0) return "";
+
+  pos = json.indexOf(':', pos + token.length());
+  if (pos < 0) return "";
+
+  int firstQuote = json.indexOf('\"', pos + 1);
+  if (firstQuote < 0) return "";
+
+  int secondQuote = json.indexOf('\"', firstQuote + 1);
+  if (secondQuote < 0) return "";
+
+  return json.substring(firstQuote + 1, secondQuote);
+}
+
+String safeCommandId(String id) {
+  String safe;
+  for (unsigned int i = 0; i < id.length() && safe.length() < 48; i++) {
+    const char c = id.charAt(i);
+    if ((c >= 'a' && c <= 'z') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+      safe += c;
+    }
+  }
+  return safe;
+}
+
+void publishDeviceStatus() {
+  if (!mqtt.connected()) return;
+
+  char payload[96];
+  snprintf(payload, sizeof(payload),
+           "{\"online\":true,\"mode\":\"%s\"}", modeName());
+  mqtt.publish(MQTT_STATUS_TOPIC, payload, true);
+  Serial.print("Published device status: ");
+  Serial.println(payload);
+}
+
+void publishCommandResult(const String& commandId, bool accepted,
+                          const char* message) {
+  if (!mqtt.connected()) return;
+
+  char payload[180];
+  snprintf(payload, sizeof(payload),
+           "{\"command_id\":\"%s\",\"accepted\":%s,"
+           "\"mode\":\"%s\",\"message\":\"%s\"}",
+           commandId.c_str(), accepted ? "true" : "false",
+           modeName(), message);
+
+  mqtt.publish(MQTT_RESULT_TOPIC, payload);
+  Serial.print("Published command result: ");
+  Serial.println(payload);
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Log every MQTT packet delivered to this client before topic filtering.
+  String topicName(topic);
+  String message;
+  message.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++) {
+    message += static_cast<char>(payload[i]);
+  }
+
+  Serial.println();
+  Serial.println("========== MQTT MESSAGE RECEIVED ==========");
+  Serial.print("Topic: ");
+  Serial.println(topicName);
+  Serial.print("Payload length: ");
+  Serial.println(length);
+  Serial.print("Payload: ");
+  Serial.println(message);
+  Serial.println("============================================");
+
+  if (topicName != MQTT_COMMAND_TOPIC) {
+    Serial.println("Message ignored: topic is not the command topic");
+    return;
+  }
+
+  Serial.println("Processing Zone 04 command...");
+
+  const String commandId =
+      safeCommandId(jsonStringField(message, "command_id"));
+  const String command = jsonStringField(message, "command");
+  const String requestedMode = jsonStringField(message, "mode");
+
+  if (command != "SET_MODE") {
+    publishCommandResult(commandId, false, "Unsupported command");
+    return;
+  }
+
+  if (requestedMode == "AUTO") {
+    operatingMode = MODE_AUTO;
+  } else if (requestedMode == "MANUAL") {
+    operatingMode = MODE_MANUAL;
+  } else {
+    publishCommandResult(commandId, false, "Invalid mode");
+    return;
+  }
+
+  // Restart the LED pattern from OFF after every accepted mode change.
+  lastLedToggleMs = millis();
+  ledState = false;
+  digitalWrite(LED_BUILTIN, LED_OFF);
+
+  Serial.print("Operating mode changed to ");
+  Serial.println(modeName());
+
+  publishDeviceStatus();
+  publishCommandResult(commandId, true, "Mode updated");
+}
+
+void publishMoisture() {
+  if (!mqtt.connected()) return;
+
+  const float moisture = readMoisturePercent();
+  char payload[64];
+  snprintf(payload, sizeof(payload),
+           "{\"moisture\":%.1f}", moisture);
+
+  if (mqtt.publish(MQTT_TOPIC, payload)) {
+    Serial.print("Published moisture: ");
+    Serial.println(payload);
+  } else {
+    Serial.println("Moisture publish FAILED");
+  }
+}
+
+void maintainWifiConnection() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  const unsigned long now = millis();
+  if (now - lastWifiAttemptMs < WIFI_RETRY_INTERVAL_MS) return;
+
+  lastWifiAttemptMs = now;
+  Serial.println("Wi-Fi disconnected; attempting reconnection");
+  WiFi.disconnect();
+  WiFi.begin();
+}
+
+bool isValidIPv4(const String& value) {
+  IPAddress parsed;
+  return parsed.fromString(value);
+}
+
+bool discoverMqttBroker() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  const IPAddress localIp = WiFi.localIP();
+  const IPAddress mask = WiFi.subnetMask();
+  const IPAddress broadcast(
+      localIp[0] | (uint8_t)~mask[0],
+      localIp[1] | (uint8_t)~mask[1],
+      localIp[2] | (uint8_t)~mask[2],
+      localIp[3] | (uint8_t)~mask[3]);
+
+  if (!discoveryUdp.begin(1885)) {
+    Serial.println("Broker discovery: could not open UDP socket");
+    return false;
+  }
+
+  Serial.print("Broker discovery: broadcasting on ");
+  Serial.println(broadcast);
+
+  bool found = false;
+  if (discoveryUdp.beginPacket(broadcast, DISCOVERY_PORT)) {
+    discoveryUdp.write((const uint8_t*)DISCOVERY_REQUEST,
+                       strlen(DISCOVERY_REQUEST));
+    discoveryUdp.endPacket();
+
+    const unsigned long started = millis();
+    while (millis() - started < 2200UL) {
+      const int packetSize = discoveryUdp.parsePacket();
+      if (packetSize > 0) {
+        char packet[100];
+        const int len = discoveryUdp.read(packet, sizeof(packet) - 1);
+        if (len > 0) {
+          packet[len] = '\0';
+          String response(packet);
+          response.trim();
+
+          const String prefix(DISCOVERY_RESPONSE_PREFIX);
+          if (response.startsWith(prefix)) {
+            const int separator = response.indexOf('|', prefix.length());
+            if (separator > 0) {
+              const String candidate =
+                  response.substring(prefix.length(), separator);
+              const String portText = response.substring(separator + 1);
+              IPAddress sourceIp = discoveryUdp.remoteIP();
+              IPAddress advertisedIp;
+
+              if (isValidIPv4(candidate) &&
+                  advertisedIp.fromString(candidate) &&
+                  advertisedIp == sourceIp &&
+                  portText == String(MQTT_PORT)) {
+                if (candidate != brokerHost) {
+                  Serial.print("Broker discovery: new broker IP found: ");
+                  Serial.println(candidate);
+                  brokerHost = candidate;
+                  saveBrokerHost(brokerHost);
+                  mqtt.setServer(brokerHost.c_str(), MQTT_PORT);
+                } else {
+                  Serial.print("Broker discovery: broker confirmed at ");
+                  Serial.println(brokerHost);
+                }
+                found = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      delay(10);
+      yield();
+    }
+  }
+
+  discoveryUdp.stop();
+  if (!found) Serial.println("Broker discovery: no response; will retry later");
+  return found;
+}
+
+void maintainMqttConnection() {
+  if (WiFi.status() != WL_CONNECTED || mqtt.connected()) return;
+
+  const unsigned long now = millis();
+  if (now - lastMqttAttemptMs < MQTT_RETRY_INTERVAL_MS) return;
+
+  lastMqttAttemptMs = now;
+  if (brokerHost.length() == 0) {
+    Serial.println("MQTT broker address is empty; configure the device");
+    return;
+  }
+
+  Serial.print("Connecting to MQTT broker ");
+  Serial.print(brokerHost);
+  Serial.print(":");
+  Serial.println(MQTT_PORT);
+
+  if (mqtt.connect(NODE_ID)) {
+    consecutiveMqttFailures = 0;
+    Serial.println("MQTT connected");
+
+    if (mqtt.subscribe(MQTT_COMMAND_TOPIC)) {
+      Serial.print("Subscribed to ");
+      Serial.println(MQTT_COMMAND_TOPIC);
+    } else {
+      Serial.println("WARNING: MQTT command subscription failed");
+    }
+
+    publishDeviceStatus();
+    lastTelemetryMs = millis() - TELEMETRY_INTERVAL_MS;
+  } else {
+    if (consecutiveMqttFailures < 255) consecutiveMqttFailures++;
+    Serial.print("MQTT connection failed, state = ");
+    Serial.println(mqtt.state());
+    Serial.printf("Consecutive MQTT failures: %u\n", consecutiveMqttFailures);
+    if (consecutiveMqttFailures >= MAX_MQTT_FAILURES_BEFORE_DISCOVERY &&
+        (lastDiscoveryAttemptMs == 0 || millis() - lastDiscoveryAttemptMs >= DISCOVERY_RETRY_INTERVAL_MS)) {
+      lastDiscoveryAttemptMs = millis();
+      discoverMqttBroker();
+    }
+  }
 }
 
 void setup() {
@@ -220,75 +502,74 @@ void setup() {
   digitalWrite(SENSOR_POWER_PIN, LOW);
   pinMode(CONFIG_PIN, INPUT_PULLUP);
 
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LED_OFF);
+
   if (!LittleFS.begin()) {
     Serial.println(
         "WARNING: LittleFS mount failed; broker config may be unavailable");
   }
 
   brokerHost = loadBrokerHost();
-  loadRtc();
 
 #if ENABLE_FLOW_INPUT
   setupFlowInput();
 #endif
 
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
 
   const bool forceConfig = (digitalRead(CONFIG_PIN) == LOW);
   const bool noConfig =
       (WiFi.SSID().length() == 0) || (brokerHost.length() == 0);
-  const bool tooManyFails =
-      (rtcData.failCount >= MAX_FAILS_BEFORE_PORTAL);
 
-  bool connected;
-  if (forceConfig || noConfig || tooManyFails) {
-    rtcData.failCount = 0;
+  bool connected = false;
+  if (forceConfig || noConfig) {
     connected = runSetupPortal();
   } else {
     connected = connectStored();
   }
 
-  if (!connected) {
-    rtcData.failCount++;
-    Serial.println("No WiFi, sleeping");
-    goToSleep();
-    return;
+  if (connected || WiFi.status() == WL_CONNECTED) {
+    Serial.print("Wi-Fi connected, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("Wi-Fi not connected; automatic retries will continue");
   }
 
-  Serial.print("WiFi OK, IP: ");
-  Serial.println(WiFi.localIP());
   Serial.println("Broker: " + brokerHost);
 
-  const float moisture = readMoisturePercent();
   mqtt.setServer(brokerHost.c_str(), MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setKeepAlive(30);
+  mqtt.setSocketTimeout(3);
+  mqtt.setBufferSize(256);
 
-  if (mqtt.connect(NODE_ID)) {
-    // Keep the legacy topic and payload unchanged for Node.js compatibility.
-    char payload[64];
-    snprintf(payload, sizeof(payload),
-             "{\"moisture\":%.1f}", moisture);
-
-    const bool ok = mqtt.publish(MQTT_TOPIC, payload);
-    Serial.println(ok ? "Published moisture telemetry"
-                      : "Publish FAILED");
-
-    mqtt.loop();
-    delay(100);
-    mqtt.disconnect();
-
-    if (ok) rtcData.failCount = 0;
-    else rtcData.failCount++;
-  } else {
-    Serial.print("MQTT FAILED, state = ");
-    Serial.println(mqtt.state());
-    rtcData.failCount++;
-  }
-
-  goToSleep();
+  lastWifiAttemptMs = millis();
+  lastMqttAttemptMs = millis() - MQTT_RETRY_INTERVAL_MS;
+  lastTelemetryMs = millis() - TELEMETRY_INTERVAL_MS;
+  lastLedToggleMs = millis();
 }
 
 void loop() {
-  // Intentionally remains a wake-read-publish-sleep node.
-  // Do not enable continuous valve control until hardware and local
-  // control requirements have been verified.
+  maintainWifiConnection();
+  maintainMqttConnection();
+
+  if (mqtt.connected()) {
+    mqtt.loop();
+
+    const unsigned long now = millis();
+    if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
+      lastTelemetryMs = now;
+      publishMoisture();
+    }
+  }
+
+  updateModeLed();
+
+#if ENABLE_FLOW_INPUT
+  updateFlowMeasurement();
+#endif
+
+  yield();
 }
