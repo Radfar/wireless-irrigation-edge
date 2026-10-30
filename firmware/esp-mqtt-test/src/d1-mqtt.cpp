@@ -485,9 +485,9 @@ void maintainMqttConnection() {
     if (consecutiveMqttFailures < 255) consecutiveMqttFailures++;
     Serial.print("MQTT connection failed, state = ");
     Serial.println(mqtt.state());
-    Serial.printf("Consecutive MQTT failures: %u\\n", consecutiveMqttFailures);
+    Serial.printf("Consecutive MQTT failures: %u\n", consecutiveMqttFailures);
     if (consecutiveMqttFailures >= MAX_MQTT_FAILURES_BEFORE_DISCOVERY &&
-        millis() - lastDiscoveryAttemptMs >= DISCOVERY_RETRY_INTERVAL_MS) {
+        (lastDiscoveryAttemptMs == 0 || millis() - lastDiscoveryAttemptMs >= DISCOVERY_RETRY_INTERVAL_MS)) {
       lastDiscoveryAttemptMs = millis();
       discoverMqttBroker();
     }
