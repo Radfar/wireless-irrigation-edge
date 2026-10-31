@@ -183,6 +183,46 @@ This fixed-code RF protocol has no acknowledgement, encryption, sender authentic
 - [Water Process Integration Testbed](https://github.com/Radfar/water-process-integration-testbed) — broader testbed architecture.
 - [OPC UA BACnet Gateway](https://github.com/Radfar/opcua-bacnet-gateway) — separate protocol gateway project.
 
+## Chart
+```mermaid
+graph TD
+    %% Styling Definitions
+    classDef fieldBox fill:#ffffff,stroke:#333333,stroke-width:1px,color:#000000;
+    classDef gatewayBox fill:#ffffff,stroke:#2b593f,stroke-width:1.5px,color:#000000;
+    classDef outputBox fill:#ffffff,stroke:#1d3557,stroke-width:1px,color:#000000;
+    classDef edgeLabel fill:#ffffff,stroke:none,color:#1d3557,font-weight:bold;
+
+    %% Field Layer
+    subgraph FIELD_LAYER [Field & Control Layer]
+        direction LR
+        Z2["<b>Zone 2: Rockwell Micro850</b><br/>Industrial PLC"]:::fieldBox
+        Z3["<b>Zone 3: CODESYS</b><br/>Software Runtime"]:::fieldBox
+        Z4["<b>Zone 4: IoT Node</b><br/>ESP8266 Microcontroller"]:::fieldBox
+        ANY["<b>Any OT Device</b><br/>Legacy Hardware"]:::fieldBox
+    end
+
+    %% Gateway Layer
+    GW["<b>Node.js / Express API</b><br/>Custom Integration Backend Layer"]:::gatewayBox
+
+    %% Output Layer
+    subgraph APPLICATION_LAYER [Storage & Visualization]
+        direction LR
+        DB[("<b>PostgreSQL</b><br/>Time-Series Database")]:::outputBox
+        SCADA["<b>Custom Web SCADA UI</b><br/>Lightweight HTML5 Dashboard"]:::outputBox
+    end
+
+    %% Network Connections & Protocols
+    Z2 -->|EtherNet/IP CIP| GW
+    Z3 -->|OPC UA| GW
+    Z4 -->|MQTT| GW
+    ANY -->|Industrial Bus| GW
+
+    GW --> DB
+    GW --> SCADA
+
+    %% Link styles
+    linkStyle default stroke:#1d3557,stroke-width:2px;
+```
 ## License
 
 MIT. See [LICENSE](LICENSE).
